@@ -1,0 +1,90 @@
+name: Build Mupen64Plus-Next (Android 4.0.4 / Xperia Play)
+
+# Official build path for this core: ndk-build from libretro/jni
+# (see libretro/jni/Android.mk and .gitlab-ci.yml -> android-armeabi-v7a-gles2).
+# Xperia Play: Snapdragon S2 (Scorpion, ARMv7-A, VFPv3 + NEON), Adreno 205 (GLES 2.0 only).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  NDK_VERSION: r23c
+  # NDK r23c cannot target below API 16 (r23 is the last NDK that supports 16;
+  # API 15 / Android 4.0.3-4.0.4 itself is not selectable). android-16 is the
+  # closest possible target.
+  APP_PLATFORM: android-16
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends make gawk binutils bash unzip curl
+
+      - name: Install Android NDK r23c
+        run: |
+          curl -fsSL -o ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          unzip -q ndk.zip -d "$RUNNER_TEMP"
+          rm ndk.zip
+          echo "NDK_ROOT=$RUNNER_TEMP/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$RUNNER_TEMP/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Generate ini headers
+        run: |
+          chmod +x generate-ini-headers.sh
+          ./generate-ini-headers.sh
+
+      - name: Build (armeabi-v7a, GLES2)
+        working-directory: libretro/jni
+        run: |
+          # Xperia Play tuning. Scorpion is ARMv7-A with NEON/VFPv3 and behaves
+          # most like a Cortex-A8 for scheduling.
+          # LTO is deliberately NOT used: Android.mk extracts struct offsets for
+          # the ARM dynarec from asm_defines.o via llvm-strings, which breaks
+          # when that object is LTO bitcode.
+          OPT_FLAGS="-O3 -mtune=cortex-a8 -mfpu=neon -mfloat-abi=softfp \
+            -fomit-frame-pointer -fno-stack-protector -fno-plt \
+            -ffunction-sections -fdata-sections \
+            -fno-math-errno -fno-trapping-math -funroll-loops \
+            -DNDEBUG -U_FORTIFY_SOURCE"
+
+          "$NDK_ROOT/ndk-build" -j"$(nproc)" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=./Android.mk \
+            NDK_APPLICATION_MK=./Application.mk \
+            APP_ABI=armeabi-v7a \
+            APP_PLATFORM="$APP_PLATFORM" \
+            APP_OPTIM=release \
+            APP_STL=c++_static \
+            APP_CFLAGS="$OPT_FLAGS" \
+            APP_CPPFLAGS="$OPT_FLAGS" \
+            APP_LDFLAGS="-Wl,--gc-sections -Wl,--icf=safe -Wl,-O2 -Wl,--as-needed -Wl,-z,norelro" \
+            GLES3=0 \
+            HAVE_PARALLEL_RDP=0 \
+            HAVE_PARALLEL_RSP=0 \
+            HAVE_THR_AL=0 \
+            LLE=0
+
+      - name: Collect output
+        run: |
+          mkdir -p dist
+          cp libretro/jni/libs/armeabi-v7a/libretro.so dist/mupen64plus_next_gles2_libretro_android.so
+          file dist/*.so || true
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -A dist/*.so | grep -Ei "Tag_CPU_arch|Tag_FP_arch|Tag_Advanced_SIMD" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mupen64plus_next_gles2_libretro_android-armv7-xperia-play
+          path: dist/mupen64plus_next_gles2_libretro_android.so
+          if-no-files-found: error
